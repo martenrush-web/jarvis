@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="JARVIS">
+<meta name="theme-color" content="#101a33">
+<title>JARVIS</title>
+<style>
+:root{
+  color-scheme: dark;
+  --bg:#101a33; --bg2:#182447; --ink:#e6ecfa; --muted:#93a0c4;
+  --accent:#7fd6ff; --accent-ink:#06223a; --warn:#ffb4a8;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+*,*::before,*::after{box-sizing:inherit}
+html,body{height:100%;margin:0}
+body{
+  background:radial-gradient(120% 80% at 50% 0%,var(--bg2),var(--bg) 70%);
+  color:var(--ink);
+  font-family:ui-rounded,"SF Pro Rounded",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  display:flex;flex-direction:column;
+}
+main{flex:1;display:flex;flex-direction:column;min-height:0;padding:20px 20px 8px;max-width:640px;width:100%;margin:0 auto}
+h1{font-size:1.1rem;font-weight:600;margin:0;letter-spacing:.02em;color:var(--muted)}
+#log{flex:1;overflow-y:auto;margin:16px 0;display:flex;flex-direction:column;justify-content:flex-end;gap:12px}
+.msg{background:rgba(255,255,255,.06);border-radius:18px;padding:14px 16px;line-height:1.5;font-size:1.05rem;max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere}
+.msg.err{background:rgba(255,180,168,.12);color:var(--warn)}
+.hint{color:var(--muted);text-align:center;margin:auto 0;line-height:1.6}
+footer{display:flex;flex-direction:column;align-items:center;gap:12px;padding:12px 0 18px}
+#status{min-height:1.4em;color:var(--muted);font-size:.95rem}
+#mic{
+  width:104px;height:104px;border-radius:50%;border:0;cursor:pointer;
+  background:var(--accent);color:var(--accent-ink);
+  display:grid;place-items:center;
+  box-shadow:0 0 0 0 rgba(127,214,255,.5);
+  transition:transform .15s ease,background .15s ease;
+}
+#mic:active{transform:scale(.96)}
+#mic:focus-visible,button.link:focus-visible,input:focus-visible{outline:3px solid #fff;outline-offset:3px}
+#mic[disabled]{opacity:.5;cursor:default}
+#mic.rec{background:#ff8f7f;animation:ring 1.4s ease-out infinite}
+@keyframes ring{to{box-shadow:0 0 0 28px rgba(255,143,127,0)}}
+@media (prefers-reduced-motion:reduce){#mic.rec{animation:none;box-shadow:0 0 0 10px rgba(255,143,127,.35)}}
+#mic svg{width:42px;height:42px}
+.row{display:flex;gap:18px}
+button.link{background:none;border:0;color:var(--muted);font:inherit;font-size:.9rem;text-decoration:underline;padding:6px;cursor:pointer}
+#gate{display:none;flex-direction:column;gap:12px;margin:auto 0}
+#gate input{font:inherit;font-size:1rem;padding:14px 16px;border-radius:14px;border:1px solid #3a4a7a;background:#0c1428;color:var(--ink)}
+#gate button{font:inherit;font-weight:600;padding:14px;border:0;border-radius:14px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+</style>
+</head>
+<body>
+<main>
+  <h1>JARVIS</h1>
+
+  <form id="gate" onsubmit="return false">
+    <p class="hint">Gib deinen Schlüssel ein. Er wird nur auf diesem Gerät gespeichert.</p>
+    <input id="key" type="password" autocomplete="off" placeholder="Schlüssel" aria-label="Schlüssel">
+    <button id="save" type="button">Speichern</button>
+  </form>
+
+  <div id="log" aria-live="polite">
+    <p class="hint" id="empty">Tippe auf das Mikrofon, sprich und tippe nochmal zum Senden.</p>
+  </div>
+
+  <footer>
+    <div id="status" role="status">Bereit</div>
+    <button id="mic" type="button" aria-label="Aufnahme starten oder beenden">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+    </button>
+    <div class="row">
+      <button class="link" id="replay" type="button" hidden>Nochmal abspielen</button>
+      <button class="link" id="change" type="button">Schlüssel ändern</button>
+    </div>
+  </footer>
+</main>
+
+<script>
+const WEBHOOK = "https://jarvis-marten.app.n8n.cloud/webhook/jarvis";
+const $ = id => document.getElementById(id);
+const player = new Audio();
+let key = "", rec = null, chunks = [], stream = null, busy = false;
+
+function getKey(){ try { return localStorage.getItem("jarvis-key") || ""; } catch(e){ return ""; } }
+function setKey(v){ try { v ? localStorage.setItem("jarvis-key", v) : localStorage.removeItem("jarvis-key"); } catch(e){} }
+
+function showGate(on){
+  $("gate").style.display = on ? "flex" : "none";
+  $("log").style.display = on ? "none" : "flex";
+  $("mic").disabled = on;
+}
+function status(t){ $("status").textContent = t; }
+function add(text, cls){
+  const e = $("empty"); if (e) e.remove();
+  const d = document.createElement("div");
+  d.className = "msg" + (cls ? " " + cls : "");
+  d.textContent = text;
+  $("log").appendChild(d);
+  d.scrollIntoView({block:"end"});
+}
+
+function pickMime(){
+  const c = ["audio/mp4","audio/webm;codecs=opus","audio/webm"];
+  return c.find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
+}
+
+async function start(){
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({audio:true});
+  }catch(e){
+    add("Kein Zugriff auf das Mikrofon. Erlaube es in den Browser-Einstellungen und lade die Seite neu.", "err");
+    return;
+  }
+  const mime = pickMime();
+  rec = new MediaRecorder(stream, mime ? {mimeType:mime} : undefined);
+  chunks = [];
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  rec.onstop = send;
+  rec.start();
+  $("mic").classList.add("rec");
+  status("Ich höre zu … tippe zum Senden");
+}
+
+function stop(){
+  if (rec && rec.state !== "inactive") rec.stop();
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  $("mic").classList.remove("rec");
+}
+
+async function send(){
+  const type = (rec.mimeType || "audio/webm").split(";")[0];
+  const ext = type.includes("mp4") ? "mp4" : "webm";
+  const blob = new Blob(chunks, {type});
+  if (blob.size < 1500){ status("Bereit"); add("Die Aufnahme war zu kurz. Versuch es nochmal.", "err"); return; }
+  busy = true; $("mic").disabled = true; status("JARVIS denkt nach …");
+  const fd = new FormData();
+  fd.append("data", blob, "aufnahme." + ext);
+  try{
+    const r = await fetch(WEBHOOK, {method:"POST", headers:{"x-jarvis-key":key}, body:fd});
+    if (r.status === 403 || r.status === 401){ setKey(""); showGate(true); status("Bereit"); return; }
+    if (!r.ok) throw new Error("Status " + r.status);
+    const j = await r.json();
+    add(j.text || "(keine Antwort)");
+    if (j.audio){ player.src = "data:audio/mpeg;base64," + j.audio; $("replay").hidden = false; speak(); }
+    else status("Bereit");
+  }catch(e){
+    add("Das hat nicht geklappt (" + e.message + "). Prüfe, ob der Workflow veröffentlicht ist, und versuch es nochmal.", "err");
+    status("Bereit");
+  }finally{
+    busy = false; $("mic").disabled = false;
+  }
+}
+
+function speak(){
+  status("JARVIS spricht …");
+  player.play().catch(() => status("Tippe auf „Nochmal abspielen“"));
+}
+player.onended = () => status("Bereit");
+
+$("mic").addEventListener("click", () => {
+  if (busy) return;
+  player.pause();
+  (rec && rec.state === "recording") ? stop() : start();
+});
+$("replay").addEventListener("click", () => { player.currentTime = 0; speak(); });
+$("change").addEventListener("click", () => { setKey(""); key = ""; $("key").value = ""; showGate(true); });
+$("save").addEventListener("click", () => {
+  const v = $("key").value.trim();
+  if (!v) return;
+  key = v; setKey(v); showGate(false); status("Bereit");
+});
+
+key = getKey();
+showGate(!key);
+</script>
+</body>
+</html>
